@@ -94,7 +94,14 @@ class StateStore:
     def load_baseline(self, metric: str) -> list:
         safe = self._sanitize(metric)
         p = self.root / "baseline" / f"{safe}.json"
-        return json.loads(p.read_text()).get("values", []) if p.exists() else []
+        lock = self._get_baseline_lock(safe)
+        with lock:
+            if not p.exists():
+                return []
+            try:
+                return json.loads(p.read_text()).get("values", [])
+            except json.JSONDecodeError:
+                return []
 
     # -- alerts zone --
 
