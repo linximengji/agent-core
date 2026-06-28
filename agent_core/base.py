@@ -1,5 +1,8 @@
 import asyncio, signal, sys, json
 from pathlib import Path
+from opentelemetry import trace
+
+_tracer = trace.get_tracer("agent_core.base")
 
 
 class BaseDaemon:
@@ -60,18 +63,27 @@ class BaseDaemon:
 
     async def _run_checks(self):
         results = {"daemon": self.name, "ts": __import__("time").strftime("%Y-%m-%dT%H:%M:%S")}
-        for name, fn in self._checks.items():
-            try:
-                results[name] = await fn()
-            except Exception as e:
-                results[name] = {"error": str(e)}
-                self.store.append_episodic({
-                    "type": "check_error", "service": name, "error": str(e)
-                })
-        self.store.update_working(results)
-        # Write heartbeat BEFORE on_check_complete (repair can block 30s+)
-        if self._heartbeat_path:
-            self._heartbeat_path.write_text(str(__import__("time").time()))
+        with _tracer.start_as_current_span("run_checks") as span:
+            span.set_attribute("daemon", self.name)
+            span.set_attribute("check_count", len(self._checks))
+            for name, fn in self._checks.items():
+                with _tracer.start_as_current_span(f"check:{name}") as cspan:
+                    try:
+                        results[name] = await fn()
+                        cspan.set_attribute("status", "ok")
+                    except Exception as e:
+                        results[name] = {"error": str(e)}
+                        cspan.set_attribute("status", "error")
+                        cspan.set_attribute("error.message", str(e)[:200])
+                        self.store.append_episodic({
+                            "type": "check_error", "service": name, "error": str(e)
+                        })
+            self.store.update_working(results)
+            if self._heartbeat_path:
+                self._heartbeat_path.write_text(str(__import__("time").time()))
+            span.set_attribute("error_count", sum(
+                1 for r in results.values() if isinstance(r, dict) and "error" in r
+            ))
         for cb in self._on_check_complete:
             try:
                 await cb(results)

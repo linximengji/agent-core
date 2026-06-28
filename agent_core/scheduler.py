@@ -2,6 +2,9 @@ import time, threading, json
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Callable
+from opentelemetry import trace
+
+_tracer = trace.get_tracer("agent_core.scheduler")
 
 
 def _cron_field(field: str, lo: int, hi: int) -> list[int]:
@@ -150,10 +153,13 @@ class Scheduler:
                     if task.due(now):
                         task.last_run = now
                         self._save()
-                        try:
-                            task.callback()
-                        except Exception:
-                            pass
+                        with _tracer.start_as_current_span(f"scheduler:{task.name}") as span:
+                            span.set_attribute("schedule", task.schedule)
+                            span.set_attribute("interval_running_since", task.last_run)
+                            try:
+                                task.callback()
+                            except Exception:
+                                pass
             time.sleep(1)
 
     def _save(self):

@@ -1,4 +1,7 @@
 import time
+from opentelemetry import trace
+
+_tracer = trace.get_tracer("agent_core.alerts")
 
 
 class AlertManager:
@@ -15,7 +18,6 @@ class AlertManager:
         key = f"{service}:{message[:60]}"
         now = time.time()
         last = self._last_sent.get(key, 0)
-        # CRITICAL uses a shorter cooldown (5 min) instead of bypassing entirely
         effective_cd = 300 if severity == "CRITICAL" else self.cooldown
         if now - last < effective_cd:
             return
@@ -28,4 +30,8 @@ class AlertManager:
             "acknowledged": False,
         }
         self.store.append_alert(record)
+        with _tracer.start_as_current_span("alert.fire") as span:
+            span.set_attribute("severity", severity)
+            span.set_attribute("service", service)
+            span.set_attribute("message", message[:100])
         return record

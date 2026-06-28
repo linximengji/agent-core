@@ -1,5 +1,8 @@
 import math
+from opentelemetry import trace
 from .state_store import StateStore
+
+_tracer = trace.get_tracer("agent_core.baseline")
 
 
 class BaselineEngine:
@@ -18,28 +21,34 @@ class BaselineEngine:
         self._shift_direction: dict[str, str] = {}
 
     def record(self, metric: str, value: float):
-        result = self.analyze(metric, value)
+        with _tracer.start_as_current_span("baseline.record") as span:
+            span.set_attribute("metric", metric)
+            span.set_attribute("value", value)
+            result = self.analyze(metric, value)
 
-        key = f"anomaly_count:{metric}"
-        is_anomaly = result["status"] == "anomaly"
+            key = f"anomaly_count:{metric}"
+            is_anomaly = result["status"] == "anomaly"
 
-        if is_anomaly:
-            count = self._consecutive_anomalies.get(key, 0) + 1
-            self._consecutive_anomalies[key] = count
-        else:
-            self._consecutive_anomalies[key] = 0
-            self._shift_counters.pop(metric, None)
-            self._shift_direction.pop(metric, None)
+            if is_anomaly:
+                count = self._consecutive_anomalies.get(key, 0) + 1
+                self._consecutive_anomalies[key] = count
+            else:
+                self._consecutive_anomalies[key] = 0
+                self._shift_counters.pop(metric, None)
+                self._shift_direction.pop(metric, None)
 
-        self._track_regime_shift(metric, value, result)
+            self._track_regime_shift(metric, value, result)
 
-        shift_counter = self._shift_counters.get(metric, 0)
-        if shift_counter >= self.shift_threshold:
-            self._accelerated_decay(metric, value)
-            self._shift_counters[metric] = 0
-            self._shift_direction.pop(metric, None)
+            shift_counter = self._shift_counters.get(metric, 0)
+            if shift_counter >= self.shift_threshold:
+                self._accelerated_decay(metric, value)
+                self._shift_counters[metric] = 0
+                self._shift_direction.pop(metric, None)
 
-        self.store.update_baseline(metric, value)
+            self.store.update_baseline(metric, value)
+            span.set_attribute("status", result["status"])
+            if "deviation" in result:
+                span.set_attribute("deviation", result["deviation"])
 
     def _track_regime_shift(self, metric, value, result):
         if "deviation" not in result or result.get("status") == "learning":
@@ -76,20 +85,28 @@ class BaselineEngine:
         self.store.replace_baseline(metric, keep)
 
     def analyze(self, metric: str, value: float) -> dict:
-        values = self.store.load_baseline(metric)
-        if len(values) < 10:
-            return {"status": "learning", "needed": 10 - len(values)}
+        with _tracer.start_as_current_span("baseline.analyze") as span:
+            span.set_attribute("metric", metric)
+            values = self.store.load_baseline(metric)
+            span.set_attribute("sample_count", len(values))
+            if len(values) < 10:
+                span.set_attribute("status", "learning")
+                return {"status": "learning", "needed": 10 - len(values)}
 
-        wm = self._weighted_median(values, self.decay_factor)
-        wdev = self._weighted_stdev(values, self.decay_factor, wm)
-        p99 = sorted(values)[int(len(values) * 0.99)]
-        deviation = (value - wm) / max(wdev, 0.01)
+            wm = self._weighted_median(values, self.decay_factor)
+            wdev = self._weighted_stdev(values, self.decay_factor, wm)
+            p99 = sorted(values)[int(len(values) * 0.99)]
+            deviation = (value - wm) / max(wdev, 0.01)
+            span.set_attribute("median", round(wm, 2))
+            span.set_attribute("p99", p99)
+            span.set_attribute("deviation", round(deviation, 2))
+            span.set_attribute("status", "ok" if abs(deviation) < 3 else "anomaly")
 
-        return {
-            "status": "ok" if abs(deviation) < 3 else "anomaly",
-            "value": value, "median": round(wm, 2),
-            "p99": p99, "deviation": round(deviation, 2),
-        }
+            return {
+                "status": "ok" if abs(deviation) < 3 else "anomaly",
+                "value": value, "median": round(wm, 2),
+                "p99": p99, "deviation": round(deviation, 2),
+            }
 
     def summary(self, metrics: dict) -> list:
         violations = []

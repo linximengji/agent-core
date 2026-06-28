@@ -3,4 +3,4 @@ name = "agent-core"
 version = "0.1.0"
 description = "Shared base library for daemon/agent projects"
 requires-python = ">=3.11"
-dependencies = ["mcp", "psutil", "httpx", "pyyaml"]
+dependencies = ["mcp", "psutil", "httpx", "pyyaml", "opentelemetry-api"]
